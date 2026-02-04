@@ -21,7 +21,6 @@ NUM_VARIATIONS = 6
 # 4. Settings
 MIN_REGION_SIZE = 150       # Larger = ignores small details (try 50-200)
 GRADIENT_CHANCE = 0.4       # 0.0 = only solid colors, 1.0 = only gradients
-MAX_IMAGE_SIZE = 2000       # Maximum width/height (larger images auto-resize)
 
 # ============================================
 # RUN THE COLORIZATION
@@ -37,12 +36,11 @@ if __name__ == "__main__":
     print(f"💾 Output folder: {OUTPUT_FOLDER}")
     print(f"🎨 Creating {NUM_VARIATIONS} variations")
     print(f"⚙️  Gradient probability: {GRADIENT_CHANCE*100}%")
-    print(f"📏 Max image size: {MAX_IMAGE_SIZE}px (auto-resize if larger)\n")
+    print(f"📏 Processing at FULL resolution (no resize)\n")
     
     system = DesignColorizationSystem(
         min_region_area=MIN_REGION_SIZE,
-        gradient_probability=GRADIENT_CHANCE,
-        max_image_size=MAX_IMAGE_SIZE
+        gradient_probability=GRADIENT_CHANCE
     )
     
     # Process your image

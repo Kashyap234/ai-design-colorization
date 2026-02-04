@@ -98,28 +98,17 @@ class ColorTheoryEngine:
 class DesignSegmenter:
     """Segments black & white design into distinct regions"""
     
-    def __init__(self, min_area=50, max_dimension=3000):
+    def __init__(self, min_area=50):
         self.min_area = min_area
-        self.max_dimension = max_dimension  # Maximum width or height
     
     def load_and_prepare(self, image_path):
-        """Load image and convert to grayscale"""
+        """Load image at FULL resolution - no resizing for accurate segmentation"""
         image = cv2.imread(image_path)
         if image is None:
             raise ValueError(f"Could not load image from {image_path}")
         
-        original_shape = image.shape
-        
-        # Resize if image is too large (prevents memory errors)
-        height, width = image.shape[:2]
-        if width > self.max_dimension or height > self.max_dimension:
-            # Calculate new dimensions maintaining aspect ratio
-            scale = self.max_dimension / max(width, height)
-            new_width = int(width * scale)
-            new_height = int(height * scale)
-            
-            print(f"      Resizing from {width}x{height} to {new_width}x{new_height} to prevent memory issues")
-            image = cv2.resize(image, (new_width, new_height), interpolation=cv2.INTER_AREA)
+        # NO RESIZING - Keep original resolution for accurate segmentation
+        print(f"      Image size: {image.shape[1]}x{image.shape[0]} (full resolution)")
         
         # Convert to grayscale
         if len(image.shape) == 3:
@@ -175,39 +164,43 @@ class GradientGenerator:
     """Generates gradient fills for regions"""
     
     @staticmethod
-    def create_linear_gradient(shape, color1, color2, angle=0):
+    def create_linear_gradient(bbox, color1, color2, angle=0):
         """
-        Create a linear gradient
+        Create a linear gradient - optimized for region bounding box only
+        bbox: (x, y, w, h) bounding rectangle
         angle: 0=horizontal, 90=vertical, etc.
         """
-        height, width = shape[:2]
-        gradient = np.zeros((height, width, 3), dtype=np.uint8)
+        x, y, w, h = bbox
+        gradient = np.zeros((h, w, 3), dtype=np.uint8)
         
         # Convert angle to radians
         angle_rad = np.radians(angle)
         
-        # Create coordinate grids
-        y, x = np.ogrid[:height, :width]
+        # Create coordinate grids for the bbox only
+        yy, xx = np.ogrid[:h, :w]
         
         # Calculate gradient direction
         if angle == 0:  # Horizontal
-            t = x / width
+            t = xx / max(w, 1)
         elif angle == 90:  # Vertical
-            t = y / height
+            t = yy / max(h, 1)
         else:
             # General angle
             cos_a = np.cos(angle_rad)
             sin_a = np.sin(angle_rad)
             
             # Project coordinates onto gradient direction
-            x_centered = x - width / 2
-            y_centered = y - height / 2
+            x_centered = xx - w / 2
+            y_centered = yy - h / 2
             
             proj = x_centered * cos_a + y_centered * sin_a
             proj_min = proj.min()
             proj_max = proj.max()
             
-            t = (proj - proj_min) / (proj_max - proj_min)
+            if proj_max > proj_min:
+                t = (proj - proj_min) / (proj_max - proj_min)
+            else:
+                t = np.zeros_like(proj)
         
         # Interpolate between colors
         for c in range(3):
@@ -216,18 +209,22 @@ class GradientGenerator:
         return gradient
     
     @staticmethod
-    def create_radial_gradient(shape, color1, color2, center=None):
-        """Create a radial gradient from center"""
-        height, width = shape[:2]
-        gradient = np.zeros((height, width, 3), dtype=np.uint8)
+    def create_radial_gradient(bbox, color1, color2, center_global):
+        """
+        Create a radial gradient - optimized for region bounding box only
+        bbox: (x, y, w, h) bounding rectangle
+        center_global: (cx, cy) center in global image coordinates
+        """
+        x, y, w, h = bbox
+        gradient = np.zeros((h, w, 3), dtype=np.uint8)
         
-        if center is None:
-            center = (width // 2, height // 2)
+        # Convert global center to local bbox coordinates
+        center_local = (center_global[0] - x, center_global[1] - y)
         
         # Create distance map from center
-        y, x = np.ogrid[:height, :width]
-        distances = np.sqrt((x - center[0])**2 + (y - center[1])**2)
-        max_dist = distances.max()
+        yy, xx = np.ogrid[:h, :w]
+        distances = np.sqrt((xx - center_local[0])**2 + (yy - center_local[1])**2)
+        max_dist = max(distances.max(), 1)
         
         t = distances / max_dist
         
@@ -350,7 +347,7 @@ class SmartColorFiller:
         return region_fills
     
     def apply_fills_to_image(self, image, contours, masks, region_fills):
-        """Apply colors and gradients to the image (memory efficient)"""
+        """Apply colors and gradients to the image (memory efficient with bbox)"""
         # Start with white background
         result = np.ones_like(image) * 255
         
@@ -363,37 +360,45 @@ class SmartColorFiller:
             if region_id >= len(stored_contours):
                 continue
             
-            # Create mask on-demand (saves memory)
+            # Get bounding box for this region
+            x, y, w, h = cv2.boundingRect(stored_contours[region_id])
+            
+            # Create mask on-demand (only for this region)
             mask = np.zeros(image_shape, dtype=np.uint8)
             cv2.drawContours(mask, [stored_contours[region_id]], -1, 255, -1)
             
+            # Extract just the region we need
+            region_mask = mask[y:y+h, x:x+w]
+            
             if fill_info['type'] == 'solid':
-                # Solid color fill
+                # Solid color fill - directly apply
                 color = fill_info['color']
                 result[mask == 255] = color[::-1]  # BGR for OpenCV
             
             elif fill_info['type'] == 'linear_gradient':
-                # Linear gradient fill
+                # Linear gradient fill - create only for bbox
                 gradient = self.gradient_gen.create_linear_gradient(
-                    image.shape,
+                    (x, y, w, h),
                     fill_info['color1'][::-1],  # BGR
                     fill_info['color2'][::-1],  # BGR
                     fill_info['angle']
                 )
-                result[mask == 255] = gradient[mask == 255]
+                # Apply gradient only where mask is active
+                result[y:y+h, x:x+w][region_mask == 255] = gradient[region_mask == 255]
             
             elif fill_info['type'] == 'radial_gradient':
-                # Radial gradient fill
+                # Radial gradient fill - create only for bbox
                 gradient = self.gradient_gen.create_radial_gradient(
-                    image.shape,
+                    (x, y, w, h),
                     fill_info['color1'][::-1],  # BGR
                     fill_info['color2'][::-1],  # BGR
                     fill_info['center']
                 )
-                result[mask == 255] = gradient[mask == 255]
+                # Apply gradient only where mask is active
+                result[y:y+h, x:x+w][region_mask == 255] = gradient[region_mask == 255]
             
-            # Clean up mask immediately
-            del mask
+            # Clean up
+            del mask, region_mask
         
         # Draw back the black lines from original
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
@@ -406,9 +411,9 @@ class SmartColorFiller:
 class DesignColorizationSystem:
     """Main system - takes your B&W design and colorizes it"""
     
-    def __init__(self, min_region_area=50, gradient_probability=0.3, max_image_size=2000):
+    def __init__(self, min_region_area=50, gradient_probability=0.3):
         self.color_engine = ColorTheoryEngine()
-        self.segmenter = DesignSegmenter(min_area=min_region_area, max_dimension=max_image_size)
+        self.segmenter = DesignSegmenter(min_area=min_region_area)
         self.filler = SmartColorFiller(gradient_probability=gradient_probability)
     
     def process(self, design_path, output_dir='./outputs', num_variations=6):
